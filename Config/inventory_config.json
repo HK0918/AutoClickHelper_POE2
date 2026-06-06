@@ -1,0 +1,62 @@
+{
+  "grid_x_ratio": 0.5921875,
+  "grid_y_ratio": 0.4097222222222222,
+  "cell_w_ratio": 0.017578125,
+  "cell_h_ratio": 0.03125,
+  "use_title": false,
+  "offset_x_ratio": 0.0,
+  "offset_y_ratio": 0.0,
+  "skip_cells": [
+    [
+      4,
+      0
+    ],
+    [
+      0,
+      0
+    ],
+    [
+      1,
+      11
+    ],
+    [
+      2,
+      0
+    ],
+    [
+      3,
+      0
+    ],
+    [
+      1,
+      0
+    ],
+    [
+      4,
+      11
+    ],
+    [
+      2,
+      11
+    ],
+    [
+      0,
+      11
+    ],
+    [
+      3,
+      11
+    ]
+  ],
+  "empty_hsv_lower": [
+    0,
+    0,
+    0
+  ],
+  "empty_hsv_upper": [
+    22,
+    171,
+    115
+  ],
+  "empty_ratio": 0.5
+}
