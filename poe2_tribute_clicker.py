@@ -6,7 +6,6 @@ POE2 자동화 툴 v7 - 해상도 독립적 설계
 
 준비 파일 (스크립트와 같은 폴더):
     tribute_symbol.png      - 헌정품 아이템 문양
-    tribute_lock.png        - 헌정품 자물쇠 버튼
     inventory_title.png     - 소지품창 타이틀
     (tribute_topleft/bottomright.png 더 이상 불필요)
 
@@ -58,11 +57,13 @@ def _cfg(filename):
 
 TEMPLATE_SYMBOL          = _res("tribute_symbol.png")
 TEMPLATE_LOCK            = _res("tribute_lock.png")
-MATCH_THRESHOLD_SYMBOL   = 0.55
+MATCH_THRESHOLD_SYMBOL   = 0.62
 YELLOW_HSV_LOWER         = np.array([10,  80, 60])
 YELLOW_HSV_UPPER         = np.array([45, 255, 255])
-NMS_DIST                 = 20
+NMS_DIST                 = 35
 CLICK_DELAY              = 0.035
+TRIBUTE_CLICK_DELAY      = 0.05   # 헌정품 클릭 간격 (씹힘 방지)
+TRIBUTE_MOUSE_HOLD       = 0.015  # 마우스 down→up 사이 대기
 
 # 헌정품 그리드 config
 TRIBUTE_CONFIG_FILE      = "tribute_config.json"
@@ -579,6 +580,80 @@ def inventory_ctrl_click():
     print(f"  완료! ({count}개 클릭)")
 
 # ──────────────────────────────────────────────
+#  Ctrl+Shift+클릭 (탭 이동용)
+# ──────────────────────────────────────────────
+
+def inventory_shift_click():
+    """
+    인벤토리 클릭과 동일하지만 Ctrl+Shift+클릭으로 수행.
+    보관함 탭 간 아이템 이동 등에 사용.
+    """
+    print("\n[Ctrl+Shift+클릭] 소지품창 탐색 중...")
+    result = find_inventory_grid()
+    if result is None:
+        print("  ✗ 소지품창을 찾을 수 없습니다.")
+        return
+    gx1, gy1, cell_w, cell_h = result
+
+    print("  0.1초 후 시작...")
+    time.sleep(0.1)
+
+    frame = capture_screen()
+    fh, fw = frame.shape[:2]
+
+    click_cells = []
+    oob = 0
+    for r in range(INV_ROWS):
+        for c in range(INV_COLS):
+            if (r, c) in INV_SKIP_CELLS:
+                continue
+            x1 = gx1 + c * cell_w + 3
+            y1 = gy1 + r * cell_h + 3
+            x2 = x1 + cell_w - 6
+            y2 = y1 + cell_h - 6
+            if x1 < 0 or y1 < 0 or x2 > fw or y2 > fh:
+                oob += 1
+                continue
+            patch = frame[y1:y2, x1:x2]
+            if patch.size > 0 and not is_empty_cell(patch):
+                click_cells.append((r, c))
+
+    if oob:
+        print(f"  ⚠ 화면 범위 밖 셀: {oob}개")
+    print(f"  아이템 감지: {len(click_cells)}개 (빈 칸 스킵)")
+
+    count = 0
+    prev_pause = pyautogui.PAUSE
+    pyautogui.PAUSE = 0
+    try:
+        for r, c in click_cells:
+            if _check_abort():
+                return
+            cur_frame = capture_screen()
+            x1 = gx1 + c * cell_w + 3
+            y1 = gy1 + r * cell_h + 3
+            x2 = x1 + cell_w - 6
+            y2 = y1 + cell_h - 6
+            patch = cur_frame[y1:y2, x1:x2]
+            if patch.size > 0 and is_empty_cell(patch):
+                continue
+
+            cx = gx1 + c * cell_w + cell_w // 2
+            cy = gy1 + r * cell_h + cell_h // 2
+            pyautogui.keyDown('ctrl')
+            pyautogui.keyDown('shift')
+            pyautogui.click(cx, cy)
+            pyautogui.keyUp('shift')
+            pyautogui.keyUp('ctrl')
+            count += 1
+            time.sleep(CLICK_DELAY)
+    finally:
+        pyautogui.PAUSE = prev_pause
+
+    print(f"  완료! ({count}개 클릭)")
+
+
+# ──────────────────────────────────────────────
 #  헌정품 관련 함수
 # ──────────────────────────────────────────────
 
@@ -718,17 +793,41 @@ def find_items_by_symbol(grid_img, grid_offset=(0, 0)):
     if symbol is None:
         return []
     sh, sw = symbol.shape[:2]
-    res    = cv2.matchTemplate(grid_img, symbol, cv2.TM_CCOEFF_NORMED)
-    locs   = np.where(res >= MATCH_THRESHOLD_SYMBOL)
-    points = list(zip(locs[1].tolist(), locs[0].tolist()))
-    scores = [res[y, x] for x, y in points]
+    ox, oy = grid_offset
+
+    # 멀티스케일 매칭 - 해상도/UI 크기가 달라도 동작
+    best_res   = None
+    best_score = 0
+    best_sw, best_sh = sw, sh
+
+    for scale in [0.7, 0.8, 0.9, 1.0, 1.1, 1.2]:
+        nw = max(1, int(sw * scale))
+        nh = max(1, int(sh * scale))
+        if nw > grid_img.shape[1] or nh > grid_img.shape[0]:
+            continue
+        sym_r = cv2.resize(symbol, (nw, nh))
+        res   = cv2.matchTemplate(grid_img, sym_r, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(res)
+        if max_val > best_score:
+            best_score = max_val
+            best_res   = res
+            best_sw, best_sh = nw, nh
+
+    if best_res is None or best_score < MATCH_THRESHOLD_SYMBOL:
+        print(f"  [문양] 0개 감지 (최고 신뢰도: {best_score:.2f})")
+        return []
+
+    locs     = np.where(best_res >= MATCH_THRESHOLD_SYMBOL)
+    points   = list(zip(locs[1].tolist(), locs[0].tolist()))
+    scores   = [best_res[y, x] for x, y in points]
     filtered = nms_points(points, scores, NMS_DIST)
-    results  = []
-    ox, oy   = grid_offset
+
+    results = []
     for (lx, ly) in filtered:
-        results.append((ox+lx+sw//2, oy+ly+sh//2, sw, sh, lx, ly, 'symbol'))
+        results.append((ox+lx+best_sw//2, oy+ly+best_sh//2,
+                        best_sw, best_sh, lx, ly, 'symbol'))
     results.sort(key=lambda r: (r[5], r[4]))
-    print(f"  [문양] {len(results)}개 감지")
+    print(f"  [문양] {len(results)}개 감지 (신뢰도 {best_score:.2f})")
     return results
 
 def find_items_by_border(grid_img, grid_offset=(0, 0)):
@@ -785,17 +884,22 @@ def find_items(grid_img, grid_offset=(0, 0)):
     return sym
 
 def click_lock_button(screen):
-    if not os.path.exists(TEMPLATE_LOCK):
+    """
+    헌정품 그리드 캘리브레이션 기준으로 자물쇠 버튼 클릭.
+    자물쇠는 그리드 우상단 모서리에서 위로 약 0.7셀 위치.
+    """
+    region = get_tribute_grid_region()
+    if region is None:
         return False
-    lock = cv2.imread(TEMPLATE_LOCK)
-    if lock is None:
-        return False
-    lh, lw = lock.shape[:2]
-    res = cv2.matchTemplate(screen, lock, cv2.TM_CCOEFF_NORMED)
-    _, val, _, loc = cv2.minMaxLoc(res)
-    if val < 0.55:
-        return False
-    cx, cy = loc[0]+lw//2, loc[1]+lh//2
+
+    left, top, w, h = region
+    sw, sh = get_screen_size()
+    cell_w = w / 12.0
+    cell_h = h / 10.0
+
+    # 자물쇠 위치: 그리드 우상단 모서리 기준, 좌측 1칸, 위로 0.7셀
+    cx = int(left + w - cell_w * 1.5)   # 우측 끝에서 1.5칸 안쪽 (한 칸 왼쪽)
+    cy = int(top  - cell_h * 0.7)        # 그리드 위로 0.7셀
     print(f"  ✓ 자물쇠 클릭: ({cx},{cy})")
     pyautogui.click(cx, cy)
     return True
@@ -848,12 +952,20 @@ def auto_click():
     if lock_clicked:
         time.sleep(0.3)
 
-    for i,(sx,sy,w,h,lx,ly,method) in enumerate(items):
-        if _check_abort():
-            break
-        print(f"  [{i+1}/{len(items)}] ({sx},{sy}) 방식={method}")
-        pyautogui.click(sx, sy)
-        time.sleep(CLICK_DELAY)
+    prev_pause = pyautogui.PAUSE
+    pyautogui.PAUSE = 0
+    try:
+        for i,(sx,sy,w,h,lx,ly,method) in enumerate(items):
+            if _check_abort():
+                break
+            print(f"  [{i+1}/{len(items)}] ({sx},{sy}) 방식={method}")
+            pyautogui.moveTo(sx, sy)
+            pyautogui.mouseDown()
+            time.sleep(TRIBUTE_MOUSE_HOLD)
+            pyautogui.mouseUp()
+            time.sleep(TRIBUTE_CLICK_DELAY)
+    finally:
+        pyautogui.PAUSE = prev_pause
     print("  완료!")
 
 # ──────────────────────────────────────────────

@@ -90,9 +90,27 @@ class AutoClickHelperApp:
         self._load_hotkeys()
 
         # 실행 상태
-        self.running     = False
-        self.module_ok   = False
-        self.kbd_hook    = None
+        self.running        = False
+        self.module_ok      = False
+        self.kbd_hook       = None
+        self.hotkey_shift   = tk.StringVar(value="SHIFT+F3")  # Ctrl+Shift 클릭 키
+        self.hotkey_autoclick = tk.StringVar(value="F6")      # 오토클릭 토글 키
+        self._autoclick_running = False
+        self._autoclick_stop    = threading.Event()
+        self._ac_mouse_hook     = None  # 오토클릭 토글용 마우스 훅 참조
+        self._ac_last_toggle    = 0.0    # 오토클릭 토글 버튼 디바운스(시간기반)용
+        self._ac_poll_stop      = threading.Event()  # 마우스버튼 폴링 스레드 중지용
+        # 키 연동 설정
+        self.keylink_trigger    = tk.StringVar(value="RBUTTON")  # 누르는 키
+        self.keylink_linked     = tk.StringVar(value="E")         # 함께 눌릴 키
+        self.keylink_active     = tk.BooleanVar(value=False)      # 활성화 여부
+        self._keylink_stop      = threading.Event()
+        self._keylink_running   = False
+        # 클릭 반복 설정
+        self.clickrepeat_trigger = tk.StringVar(value="MOUSE4")
+        self.clickrepeat_active  = tk.BooleanVar(value=False)
+        self._clickrepeat_stop   = threading.Event()
+        self._clickrepeat_running = False
 
         self._build_ui()
 
@@ -136,8 +154,15 @@ class AutoClickHelperApp:
         hk_frame = tk.Frame(self.root, bg=BG_CARD, padx=12, pady=10)
         hk_frame.pack(fill="x", padx=12, pady=(0,8))
 
-        self._hotkey_row(hk_frame, "인벤토리 클릭 (F1 역할)", self.hotkey_inv,  0)
-        self._hotkey_row(hk_frame, "헌정품 클릭    (F2 역할)", self.hotkey_trib, 1)
+        self._hotkey_row(hk_frame, "인벤토리 클릭       (F1 역할)", self.hotkey_inv,   0)
+        self._hotkey_row(hk_frame, "헌정품 클릭          (F2 역할)", self.hotkey_trib,  1)
+        self._hotkey_row(hk_frame, "Ctrl+Shift 클릭 키",             self.hotkey_shift, 2)
+        self._hotkey_row(hk_frame, "오토클릭 토글 키",               self.hotkey_autoclick, 3, mouse_capture=True)
+
+        ac_info = tk.Label(hk_frame,
+                 text="  ← F키/마우스 측면버튼(MOUSE4/5) 등. 누르면 현재 마우스 위치에서 50ms 간격 클릭 토글 (POE2 인게임에서만)",
+                 font=("Consolas", 8), fg=TEXT_SEC, bg=BG_CARD)
+        ac_info.grid(row=4, column=0, columnspan=3, sticky="w", pady=(0,4))
 
         # ── 실행 버튼 ──
         self._section("실행")
@@ -148,7 +173,11 @@ class AutoClickHelperApp:
         stop_lbl = tk.Label(btn_outer, text="⚠  동작 중 우클릭으로 즉시 중단",
                             font=("Consolas", 8, "bold"),
                             fg="#e05050", bg=BG_DARK)
-        stop_lbl.grid(row=0, column=0, columnspan=2, pady=(0, 6), sticky="w")
+        stop_lbl.grid(row=0, column=0, columnspan=2, pady=(0, 2), sticky="w")
+        shift_lbl = tk.Label(btn_outer,
+                             text="⇧  Ctrl+Shift 클릭 키: 인벤토리 클릭과 동일하지만 Ctrl+Shift+클릭으로 수행",
+                             font=("Consolas", 7), fg=TEXT_DIM, bg=BG_DARK)
+        shift_lbl.grid(row=1, column=0, columnspan=2, pady=(0, 6), sticky="w")
 
         # 버튼 그리드 (2열 × 4행, 완전 균등)
         btn_outer.columnconfigure(0, weight=1, uniform="col")
@@ -168,8 +197,96 @@ class AutoClickHelperApp:
         for text, color, cmd, row, col in buttons:
             b = self._btn(btn_outer, text, color, cmd)
             px_l = (0, 3) if col == 0 else (3, 0)
-            b.grid(row=row, column=col, sticky="nsew",
+            b.grid(row=row+2, column=col, sticky="nsew",
                    padx=px_l, pady=3, ipady=4)
+
+        # ── 키 연동 설정 ──
+        self._section("키 연동 설정")
+        kl_frame = tk.Frame(self.root, bg=BG_CARD, padx=12, pady=10)
+        kl_frame.pack(fill="x", padx=12, pady=(0,8))
+
+        tk.Label(kl_frame,
+                 text="지정한 버튼을 누르고 있는 동안 연동 키도 함께 눌림  (예: 우클릭 누르는 동안 E 키도 누름)",
+                 font=("Consolas", 8), fg=TEXT_SEC, bg=BG_CARD).grid(
+                 row=0, column=0, columnspan=5, sticky="w", pady=(0,6))
+
+        tk.Label(kl_frame, text="누르는 키", font=FONT_SMALL,
+                 fg=TEXT_SEC, bg=BG_CARD).grid(row=1, column=0, padx=(0,4), sticky="w")
+        self._keylink_trigger_entry = tk.Entry(
+            kl_frame, textvariable=self.keylink_trigger, width=10,
+            font=FONT_BTN, bg=BG_DARK, fg=ACCENT2,
+            insertbackground=ACCENT, relief="flat", justify="center")
+        self._keylink_trigger_entry.grid(row=1, column=1, padx=(0,6))
+
+        btn_t = tk.Button(kl_frame, text="키 입력 저장", font=("Consolas", 8),
+                          bg=BORDER, fg=TEXT_PRI, relief="flat", padx=6, pady=2,
+                          cursor="hand2",
+                          command=lambda: self._capture_keylink("trigger"))
+        btn_t.grid(row=1, column=2, padx=(0,16))
+
+        tk.Label(kl_frame, text="→  함께 누를 키", font=FONT_SMALL,
+                 fg=TEXT_SEC, bg=BG_CARD).grid(row=1, column=3, padx=(0,4), sticky="w")
+        self._keylink_linked_entry = tk.Entry(
+            kl_frame, textvariable=self.keylink_linked, width=8,
+            font=FONT_BTN, bg=BG_DARK, fg=ACCENT2,
+            insertbackground=ACCENT, relief="flat", justify="center")
+        self._keylink_linked_entry.grid(row=1, column=4, padx=(0,6))
+
+        btn_l = tk.Button(kl_frame, text="키 입력 저장", font=("Consolas", 8),
+                          bg=BORDER, fg=TEXT_PRI, relief="flat", padx=6, pady=2,
+                          cursor="hand2",
+                          command=lambda: self._capture_keylink("linked"))
+        btn_l.grid(row=1, column=5, padx=(0,16))
+
+        kl_check_frame = tk.Frame(kl_frame, bg=BG_CARD)
+        kl_check_frame.grid(row=2, column=0, columnspan=6, sticky="w", pady=(8,0))
+        tk.Checkbutton(kl_check_frame, variable=self.keylink_active,
+                       bg=BG_CARD, activebackground=BG_CARD,
+                       selectcolor=BG_DARK,
+                       command=self._toggle_keylink).pack(side="left")
+        self.keylink_status_lbl = tk.Label(
+            kl_check_frame, text="비활성",
+            font=("Consolas", 9, "bold"), fg=TEXT_DIM, bg=BG_CARD)
+        self.keylink_status_lbl.pack(side="left", padx=(4,0))
+
+        # ── 클릭 반복 ──
+        self._section("클릭 반복")
+        cr_frame = tk.Frame(self.root, bg=BG_CARD, padx=12, pady=10)
+        cr_frame.pack(fill="x", padx=12, pady=(0,8))
+
+        tk.Label(cr_frame,
+                 text="지정한 버튼을 누르고 있는 동안 좌클릭을 50ms 간격으로 반복",
+                 font=("Consolas", 8), fg=TEXT_SEC, bg=BG_CARD).grid(
+                 row=0, column=0, columnspan=4, sticky="w", pady=(0,2))
+        tk.Label(cr_frame,
+                 text="⚠  마우스 좌클릭/우클릭으로 지정하면 정상 동작하지 않습니다",
+                 font=("Consolas", 8), fg=RED, bg=BG_CARD).grid(
+                 row=1, column=0, columnspan=4, sticky="w", pady=(0,6))
+
+        tk.Label(cr_frame, text="누르는 키", font=FONT_SMALL,
+                 fg=TEXT_SEC, bg=BG_CARD).grid(row=2, column=0, padx=(0,4), sticky="w")
+        self._cr_entry = tk.Entry(
+            cr_frame, textvariable=self.clickrepeat_trigger, width=10,
+            font=FONT_BTN, bg=BG_DARK, fg=ACCENT2,
+            insertbackground=ACCENT, relief="flat", justify="center")
+        self._cr_entry.grid(row=2, column=1, padx=(0,6))
+
+        btn_cr = tk.Button(cr_frame, text="키 입력 저장", font=("Consolas", 8),
+                           bg=BORDER, fg=TEXT_PRI, relief="flat", padx=6, pady=2,
+                           cursor="hand2",
+                           command=self._capture_clickrepeat_key)
+        btn_cr.grid(row=2, column=2, padx=(0,16))
+
+        cr_check_frame = tk.Frame(cr_frame, bg=BG_CARD)
+        cr_check_frame.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8,0))
+        tk.Checkbutton(cr_check_frame, variable=self.clickrepeat_active,
+                       bg=BG_CARD, activebackground=BG_CARD,
+                       selectcolor=BG_DARK,
+                       command=self._toggle_clickrepeat).pack(side="left")
+        self.cr_status_lbl = tk.Label(
+            cr_check_frame, text="비활성",
+            font=("Consolas", 9, "bold"), fg=TEXT_DIM, bg=BG_CARD)
+        self.cr_status_lbl.pack(side="left", padx=(4,0))
 
         # ── 로그 ──
         self._section("LOG")
@@ -231,7 +348,7 @@ class AutoClickHelperApp:
         b.bind("<Leave>", on_leave)
         return b
 
-    def _hotkey_row(self, parent, label, var, row):
+    def _hotkey_row(self, parent, label, var, row, mouse_capture=False):
         tk.Label(parent, text=label, font=FONT_SMALL,
                  fg=TEXT_SEC, bg=BG_CARD, width=28,
                  anchor="w").grid(row=row, column=0, padx=(0,8), pady=3, sticky="w")
@@ -245,7 +362,50 @@ class AutoClickHelperApp:
         def start_capture(e=None, v=var, ent=entry):
             ent.config(fg=GREEN)
             v.set("입력 대기...")
-            self.root.bind("<KeyPress>", lambda ev, v=v, ent=ent: self._capture_key(ev, v, ent))
+            done = [False]
+
+            def finish(key_name):
+                if done[0]:
+                    return
+                done[0] = True
+                v.set(key_name)
+                ent.config(fg=ACCENT2)
+                try:
+                    self.root.unbind("<KeyPress>")
+                except:
+                    pass
+                self._save_hotkeys()
+                self._start_hotkey_listener()
+                self._log(f"핫키 저장: {key_name}", "ok")
+
+            # 키보드 입력 캡처
+            def on_key(ev):
+                key = ev.keysym.upper()
+                if key.startswith("F") and key[1:].isdigit():
+                    finish(key)
+                elif len(key) == 1 and key.isalpha():
+                    finish(key)
+                else:
+                    finish(key[:4])
+            self.root.bind("<KeyPress>", on_key)
+
+            # 마우스 버튼 캡처 (측면 버튼 등)
+            if mouse_capture:
+                try:
+                    import mouse
+                    def on_mouse(mev, finish=finish):
+                        if isinstance(mev, mouse.ButtonEvent) and mev.event_type == 'down':
+                            # 'left'는 "키 입력 저장" 버튼 클릭 자체일 수 있어 제외
+                            if mev.button == 'left':
+                                return
+                            name_map = {'x': 'MOUSE4', 'x2': 'MOUSE5',
+                                         'right': 'MOUSE_RIGHT', 'middle': 'MOUSE_MIDDLE'}
+                            key_name = name_map.get(mev.button, mev.button.upper())
+                            mouse.unhook(on_mouse)
+                            self.root.after(0, finish, key_name)
+                    mouse.hook(on_mouse)
+                except Exception as e:
+                    self._log(f"마우스 캡처 실패: {e}", "warn")
 
         btn = tk.Button(parent, text="키 입력 저장",
                         font=("Consolas", 8), bg=BORDER, fg=TEXT_PRI,
@@ -258,27 +418,13 @@ class AutoClickHelperApp:
         btn.bind("<Enter>", on_e)
         btn.bind("<Leave>", on_l)
 
-    def _capture_key(self, event, var, entry):
-        """키 입력 캡처"""
-        key = event.keysym.upper()
-        # F키 또는 알파벳만 허용
-        if key.startswith("F") and key[1:].isdigit():
-            var.set(key)
-        elif len(key) == 1 and key.isalpha():
-            var.set(key)
-        else:
-            var.set(key[:4])
-        entry.config(fg=ACCENT2)
-        self.root.unbind("<KeyPress>")
-        self._save_hotkeys()
-        self._start_hotkey_listener()
-        self._log(f"핫키 저장: {var.get()}", "ok")
-
     # ──────────────────────────────────────────
     #  핫키 저장/로드
     # ──────────────────────────────────────────
     def _save_hotkeys(self):
-        cfg = {"inv": self.hotkey_inv.get(), "trib": self.hotkey_trib.get()}
+        cfg = {"inv": self.hotkey_inv.get(), "trib": self.hotkey_trib.get(),
+               "shift_inv": self.hotkey_shift.get(),
+               "autoclick": self.hotkey_autoclick.get()}
         with open(self.hotkey_file, "w") as f:
             json.dump(cfg, f)
 
@@ -288,6 +434,8 @@ class AutoClickHelperApp:
                 cfg = json.load(open(self.hotkey_file))
                 self.hotkey_inv.set(cfg.get("inv", "F1"))
                 self.hotkey_trib.set(cfg.get("trib", "F2"))
+                self.hotkey_shift.set(cfg.get("shift_inv", "SHIFT+F3"))
+                self.hotkey_autoclick.set(cfg.get("autoclick", "F6"))
             except:
                 pass
 
@@ -313,7 +461,35 @@ class AutoClickHelperApp:
             kb.add_hotkey("ctrl+f6",  lambda: threading.Thread(target=self._run_trib_calib,  daemon=True).start(), suppress=False)
             kb.add_hotkey("ctrl+f7",  lambda: self.root.after(0, self._run_skip_cells),  suppress=False)
             kb.add_hotkey("ctrl+f8",  lambda: threading.Thread(target=self._run_hsv,     daemon=True).start(), suppress=False)
-            self._log(f"핫키 등록: {inv_key.upper()}=인벤 / {trib_key.upper()}=헌정품", "ok")
+            shift_key = self.hotkey_shift.get().lower().replace("+", "+")
+            kb.add_hotkey(shift_key, lambda: threading.Thread(target=self._run_shift_inventory, daemon=True).start(), suppress=False)
+            ac_key = self.hotkey_autoclick.get().upper()
+
+            # 기존 마우스 훅 해제
+            if self._ac_mouse_hook is not None:
+                try:
+                    import mouse
+                    mouse.unhook(self._ac_mouse_hook)
+                except:
+                    pass
+                self._ac_mouse_hook = None
+
+            # 기존 폴링 스레드 정지
+            self._ac_poll_stop.set()
+
+            VK_MAP = {'MOUSE4': 0x05, 'MOUSE5': 0x06,
+                      'MOUSE_RIGHT': 0x02, 'MOUSE_MIDDLE': 0x04}
+
+            if ac_key in VK_MAP:
+                vk = VK_MAP[ac_key]
+                self._ac_poll_stop = threading.Event()
+                threading.Thread(target=self._ac_mouse_poll_loop,
+                                args=(vk, self._ac_poll_stop), daemon=True).start()
+            else:
+                kb.add_hotkey(ac_key.lower(), lambda: self.root.after(0, self._toggle_autoclick), suppress=False)
+
+            self._log(f"핫키 등록: {inv_key.upper()}=인벤 / {trib_key.upper()}=헌정품 / "
+                      f"{shift_key.upper()}=Shift클릭 / {ac_key}=오토클릭토글", "ok")
         except Exception as e:
             self._log(f"핫키 등록 실패: {e}", "warn")
 
@@ -328,6 +504,7 @@ class AutoClickHelperApp:
                 m.load_inv_config()
                 m.load_tribute_config()
                 self.module_ok = True
+                self.root.after(0, self._load_keylink_config)
                 self._set_status("준비", GREEN)
                 self._log("모듈 로드 완료", "ok")
             except Exception as e:
@@ -378,6 +555,347 @@ class AutoClickHelperApp:
 
     def _run_inventory(self):
         self._run_in_thread(self.m.inventory_ctrl_click, "인벤토리 클릭")
+
+    def _run_shift_inventory(self):
+        """Ctrl+Shift+클릭으로 인벤토리 수행"""
+        self._run_in_thread(self.m.inventory_shift_click, "Ctrl+Shift 클릭")
+
+    # ──────────────────────────────────────────
+    #  키 연동 설정
+    # ──────────────────────────────────────────
+
+    # 트리거 키 → VK 코드 매핑
+    TRIGGER_VK_MAP = {
+        'RBUTTON': 0x02, 'LBUTTON': 0x01, 'MBUTTON': 0x04,
+        'MOUSE4': 0x05,  'MOUSE5': 0x06,
+    }
+    # 연동 키(알파벳/F키 등) → VK 코드
+    @staticmethod
+    def _name_to_vk(name):
+        import win32con
+        name = name.upper().strip()
+        vk_map = {
+            'RBUTTON': 0x02, 'LBUTTON': 0x01, 'MBUTTON': 0x04,
+            'MOUSE4': 0x05, 'MOUSE5': 0x06,
+        }
+        if name in vk_map:
+            return vk_map[name]
+        if len(name) == 1 and name.isalpha():
+            return ord(name)
+        if name.startswith('F') and name[1:].isdigit():
+            return getattr(win32con, f'VK_F{name[1:]}', None)
+        special = {'SHIFT':0x10,'CTRL':0x11,'ALT':0x12,'SPACE':0x20,
+                   'ENTER':0x0D,'TAB':0x09,'ESC':0x1B}
+        return special.get(name)
+
+    @staticmethod
+    def _poe_focused():
+        """POE2 인게임 포커스 여부 확인"""
+        try:
+            import win32gui
+            title = win32gui.GetWindowText(win32gui.GetForegroundWindow())
+            return "Path of Exile" in title
+        except:
+            return False
+
+    def _capture_keylink(self, which):
+        """트리거 또는 연동 키 캡처"""
+        var  = self.keylink_trigger if which == "trigger" else self.keylink_linked
+        ent  = self._keylink_trigger_entry if which == "trigger" else self._keylink_linked_entry
+        ent.config(fg=GREEN)
+        var.set("입력 대기...")
+        done = [False]
+
+        def finish(key_name):
+            if done[0]: return
+            done[0] = True
+            var.set(key_name)
+            ent.config(fg=ACCENT2)
+            try: self.root.unbind("<KeyPress>")
+            except: pass
+            self._save_keylink_config()
+            self._log(f"키 연동 저장: {key_name}", "ok")
+
+        def on_key(ev):
+            key = ev.keysym.upper()
+            if key.startswith("F") and key[1:].isdigit():
+                finish(key)
+            elif len(key) == 1 and key.isalpha():
+                finish(key)
+            else:
+                finish(key[:8])
+        self.root.bind("<KeyPress>", on_key)
+
+        # 마우스 버튼 캡처
+        try:
+            import mouse
+            def on_mouse(mev, f=finish):
+                if not isinstance(mev, mouse.ButtonEvent) or mev.event_type != 'down':
+                    return
+                if mev.button == 'left': return
+                name_map = {'right':'RBUTTON','x':'MOUSE4','x2':'MOUSE5','middle':'MBUTTON'}
+                mouse.unhook(on_mouse)
+                self.root.after(0, f, name_map.get(mev.button, mev.button.upper()))
+            mouse.hook(on_mouse)
+        except: pass
+
+    def _save_keylink_config(self):
+        cfg_path = os.path.join(os.path.dirname(self.hotkey_file), "keylink_config.json")
+        try:
+            with open(cfg_path, 'w') as f:
+                import json
+                json.dump({
+                    'trigger': self.keylink_trigger.get(),
+                    'linked':  self.keylink_linked.get(),
+                }, f)
+        except: pass
+
+    def _load_keylink_config(self):
+        cfg_path = os.path.join(os.path.dirname(self.hotkey_file), "keylink_config.json")
+        try:
+            import json
+            cfg = json.load(open(cfg_path))
+            self.keylink_trigger.set(cfg.get('trigger', 'RBUTTON'))
+            self.keylink_linked.set(cfg.get('linked', 'E'))
+        except: pass
+
+    def _toggle_keylink(self):
+        if self.keylink_active.get():
+            self._keylink_stop.clear()
+            self._keylink_running = True
+            threading.Thread(target=self._keylink_loop, daemon=True).start()
+            trigger = self.keylink_trigger.get()
+            linked  = self.keylink_linked.get()
+            self.keylink_status_lbl.config(
+                text=f"활성: [{trigger}] 누르는 동안 [{linked}] 함께 누름", fg=GREEN)
+            self._log(f"키 연동 활성: [{trigger}] 홀드 시 [{linked}] 동시 입력", "ok")
+        else:
+            self._keylink_running = False
+            self._keylink_stop.set()
+            self.keylink_status_lbl.config(text="비활성", fg=TEXT_DIM)
+            self._log("키 연동 비활성", "dim")
+
+    def _keylink_loop(self):
+        """트리거 키 홀드 감지 → 연동 키 동시 입력"""
+        import ctypes
+
+        KEYEVENTF_KEYUP = 0x0002
+        user32 = ctypes.windll.user32
+
+        def vk_is_down(vk):
+            return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+
+        def key_down(vk):
+            user32.keybd_event(vk, 0, 0, 0)
+
+        def key_up(vk):
+            user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+
+        linked_held = False
+
+        while self._keylink_running and not self._keylink_stop.is_set():
+            trigger_vk = self._name_to_vk(self.keylink_trigger.get())
+            linked_vk  = self._name_to_vk(self.keylink_linked.get())
+
+            if trigger_vk is None or linked_vk is None:
+                time.sleep(0.05)
+                continue
+
+            trigger_down = vk_is_down(trigger_vk) and self._poe_focused()
+
+            if trigger_down and not linked_held:
+                key_down(linked_vk)
+                linked_held = True
+            elif not trigger_down and linked_held:
+                key_up(linked_vk)
+                linked_held = False
+
+            time.sleep(0.005)
+
+        # 종료 시 연동 키가 눌린 채 남아있으면 해제
+        if linked_held:
+            linked_vk = self._name_to_vk(self.keylink_linked.get())
+            if linked_vk:
+                key_up(linked_vk)
+
+    # ──────────────────────────────────────────
+    #  클릭 반복
+    # ──────────────────────────────────────────
+
+    def _capture_clickrepeat_key(self):
+        """클릭 반복 트리거 키 캡처"""
+        ent = self._cr_entry
+        ent.config(fg=GREEN)
+        self.clickrepeat_trigger.set("입력 대기...")
+        done = [False]
+
+        def finish(key_name):
+            if done[0]: return
+            done[0] = True
+            self.clickrepeat_trigger.set(key_name)
+            ent.config(fg=ACCENT2)
+            try: self.root.unbind("<KeyPress>")
+            except: pass
+            self._save_keylink_config()
+            self._log(f"클릭 반복 키 저장: {key_name}", "ok")
+
+        def on_key(ev):
+            key = ev.keysym.upper()
+            if key.startswith("F") and key[1:].isdigit():
+                finish(key)
+            elif len(key) == 1 and key.isalpha():
+                finish(key)
+            else:
+                finish(key[:8])
+        self.root.bind("<KeyPress>", on_key)
+
+        try:
+            import mouse
+            def on_mouse(mev, f=finish):
+                if not isinstance(mev, mouse.ButtonEvent) or mev.event_type != 'down':
+                    return
+                if mev.button == 'left': return
+                name_map = {'right':'RBUTTON','x':'MOUSE4','x2':'MOUSE5','middle':'MBUTTON'}
+                mouse.unhook(on_mouse)
+                self.root.after(0, f, name_map.get(mev.button, mev.button.upper()))
+            mouse.hook(on_mouse)
+        except: pass
+
+    def _toggle_clickrepeat(self):
+        if self.clickrepeat_active.get():
+            self._clickrepeat_stop.clear()
+            self._clickrepeat_running = True
+            threading.Thread(target=self._clickrepeat_loop, daemon=True).start()
+            key = self.clickrepeat_trigger.get()
+            self.cr_status_lbl.config(
+                text=f"활성: [{key}] 누르는 동안 좌클릭 50ms 반복", fg=GREEN)
+            self._log(f"클릭 반복 활성: [{key}] 홀드 시 좌클릭 50ms 반복", "ok")
+        else:
+            self._clickrepeat_running = False
+            self._clickrepeat_stop.set()
+            self.cr_status_lbl.config(text="비활성", fg=TEXT_DIM)
+            self._log("클릭 반복 비활성", "dim")
+
+    def _clickrepeat_loop(self):
+        """트리거 키 홀드 감지 → 좌클릭 50ms 반복"""
+        import ctypes
+
+        MOUSEEVENTF_LEFTDOWN = 0x0002
+        MOUSEEVENTF_LEFTUP   = 0x0004
+        INTERVAL = 0.05
+        HOLD     = 0.01
+
+        user32 = ctypes.windll.user32
+
+        def trigger_is_down():
+            vk = self._name_to_vk(self.clickrepeat_trigger.get())
+            if vk is None:
+                return False
+            return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+
+        was_down = False
+
+        while self._clickrepeat_running and not self._clickrepeat_stop.is_set():
+            if trigger_is_down() and self._poe_focused():
+                if not was_down:
+                    was_down = True
+
+                user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                time.sleep(HOLD)
+                user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+                next_tick = time.perf_counter() + INTERVAL - HOLD
+                while time.perf_counter() < next_tick:
+                    if not trigger_is_down() or not self._poe_focused():
+                        break
+                    time.sleep(0.005)
+            else:
+                was_down = False
+                time.sleep(0.005)
+
+    def _ac_mouse_poll_loop(self, vk, stop_event):
+        """GetAsyncKeyState로 마우스 측면버튼(M4/M5 등) 눌림을 감지해 오토클릭 토글"""
+        import win32api
+        prev = False
+        while not stop_event.is_set():
+            state = bool(win32api.GetAsyncKeyState(vk) & 0x8000)
+            if state and not prev:
+                self.root.after(0, self._toggle_autoclick)
+            prev = state
+            time.sleep(0.015)
+
+    def _toggle_autoclick(self):
+        """오토클릭 토글 - 현재 마우스 위치에서 50ms 간격 클릭 시작/정지"""
+        self._autoclick_running = not self._autoclick_running
+        if self._autoclick_running:
+            self._autoclick_stop.clear()
+            threading.Thread(target=self._autoclick_pos_loop, daemon=True).start()
+            self._log("오토클릭 ON - 현재 마우스 위치에서 50ms 간격 클릭 (POE2 인게임에서만)", "ok")
+        else:
+            self._autoclick_stop.set()
+            self._log("오토클릭 OFF", "dim")
+
+    def _autoclick_pos_loop(self):
+        """
+        현재 마우스 위치에서 50ms 간격으로 좌클릭 반복 (POE2 포커스일 때만)
+        토글 ON 동안 가상으로 Shift 키를 누른 상태로 유지 (크래프팅 연속 적용용).
+        토글 OFF 시 Shift도 함께 해제.
+        """
+        import win32api, win32con, win32gui, win32process
+
+        VK_SHIFT        = 0x10
+        KEYEVENTF_KEYUP = 0x0002
+
+        # 가상 Shift 누름 시작
+        win32api.keybd_event(VK_SHIFT, 0, 0, 0)
+
+        try:
+            INTERVAL = 0.05  # 클릭 간격 (down→down) 50ms
+            HOLD     = 0.01  # down→up 유지 시간
+
+            def poe_focused():
+                """
+                창 제목 대신 프로세스(exe) 이름으로 판단.
+                팝업/툴팁 등도 같은 프로세스 소속이라 제목이 달라도 정상 인식됨.
+                """
+                try:
+                    hwnd = win32gui.GetForegroundWindow()
+                    title = win32gui.GetWindowText(hwnd)
+                    if "Path of Exile" in title:
+                        return True
+                    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    hproc = win32api.OpenProcess(
+                        win32con.PROCESS_QUERY_INFORMATION | win32con.PROCESS_VM_READ,
+                        False, pid)
+                    try:
+                        exe = win32process.GetModuleFileNameEx(hproc, 0)
+                    finally:
+                        win32api.CloseHandle(hproc)
+                    return "pathofexile" in os.path.basename(exe).lower()
+                except:
+                    return False
+
+            next_tick = time.perf_counter()
+            while self._autoclick_running and not self._autoclick_stop.is_set():
+                now = time.perf_counter()
+                if now < next_tick:
+                    time.sleep(min(0.005, next_tick - now))
+                    continue
+
+                if poe_focused():
+                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                    time.sleep(HOLD)
+                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                    next_tick += INTERVAL
+                else:
+                    next_tick = time.perf_counter() + INTERVAL
+                    time.sleep(0.02)
+
+        except Exception as e:
+            self._log(f"오토클릭 오류: {e}", "error")
+        finally:
+            # 가상 Shift 해제
+            win32api.keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0)
 
     def _run_tribute(self):
         self._run_in_thread(self.m.auto_click, "헌정품 클릭")

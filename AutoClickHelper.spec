@@ -5,7 +5,7 @@ a = Analysis(
     ['auto_click_helper_ui.py'],
     pathex=[],
     binaries=[],
-    datas=[('poe2_tribute_clicker.py', '.'), ('tribute_symbol.png', '.'), ('tribute_lock.png', '.')],
+    datas=[('poe2_tribute_clicker.py', '.'), ('tribute_symbol.png', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

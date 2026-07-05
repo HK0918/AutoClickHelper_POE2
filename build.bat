@@ -7,7 +7,7 @@ echo.
 
 echo [1/4] Installing required packages...
 python -m pip install --upgrade pip --quiet
-python -m pip install pyinstaller opencv-python numpy pyautogui keyboard Pillow pywin32 --quiet
+python -m pip install pyinstaller opencv-python numpy pyautogui keyboard Pillow pywin32 mouse --quiet
 echo Done.
 
 echo.
@@ -31,7 +31,6 @@ python -m PyInstaller ^
   --name AutoClickHelper ^
   --add-data poe2_tribute_clicker.py;. ^
   --add-data tribute_symbol.png;. ^
-  --add-data tribute_lock.png;. ^
   auto_click_helper_ui.py
 
 echo.

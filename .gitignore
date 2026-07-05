@@ -1,0 +1,11 @@
+build/
+dist/
+__pycache__/
+*.pyc
+
+# Runtime-generated config (user-specific, not source)
+hotkey_config.json
+inventory_config.json
+tribute_config.json
+keylink_config.json
+Config/
